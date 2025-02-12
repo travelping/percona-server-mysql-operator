@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/pkg/errors"
@@ -33,8 +34,8 @@ func NewDatabase(ctx context.Context, user apiv1alpha1.SystemUser, pass, host st
 	config.Params = map[string]string{
 		"interpolateParams": "true",
 		"timeout":           "10s",
-		"readTimeout":       "10s",
-		"writeTimeout":      "10s",
+		"readTimeout":       "3h",
+		"writeTimeout":      "3h",
 		"tls":               "preferred",
 	}
 
@@ -164,7 +165,10 @@ func (d *DB) Clone(ctx context.Context, donor, user, pass string, port int32) er
 		return errors.Wrap(err, "set clone_valid_donor_list")
 	}
 
-	_, err = d.db.ExecContext(ctx, "CLONE INSTANCE FROM ?@?:? IDENTIFIED BY ?", user, donor, port, pass)
+	cloneCtx, cancel := context.WithTimeout(context.Background(), 1200*time.Second)
+	defer cancel()
+	_, err = d.db.ExecContext(cloneCtx, "CLONE INSTANCE FROM ?@?:? IDENTIFIED BY ?", user, donor, port, pass)
+	// _, err = d.db.ExecContext(ctx, "CLONE INSTANCE FROM ?@?:? IDENTIFIED BY ?", user, donor, port, pass)
 
 	mErr, ok := err.(*mysql.MySQLError)
 	if !ok {
