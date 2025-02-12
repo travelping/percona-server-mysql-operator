@@ -3282,8 +3282,13 @@ spec:
                             format: int32
                             type: integer
                         required:
+                        - connectTimeout
+                        - idleTime
                         - image
+                        - readTimeout
+                        - serverId
                         - storage
+                        - writeTimeout
                         type: object
                       enabled:
                         type: boolean
@@ -11686,7 +11691,7 @@ spec:
           value: ""
         - name: DISABLE_TELEMETRY
           value: "false"
-        image: perconalab/percona-server-mysql-operator:main
+        image: percona/percona-server-mysql-operator:0.9.0
         imagePullPolicy: Always
         livenessProbe:
           httpGet:
