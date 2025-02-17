@@ -298,6 +298,13 @@ func haproxyContainer(cr *apiv1alpha1.PerconaServerMySQL) corev1.Container {
 		EnvFrom:         spec.EnvFrom,
 		Command:         []string{"/opt/percona/haproxy-entrypoint.sh"},
 		Args:            []string{"haproxy"},
+		Lifecycle: &corev1.Lifecycle{
+			PreStop: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"kill", "-TERM", "1"},
+				},
+			},
+		},
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "mysql",
