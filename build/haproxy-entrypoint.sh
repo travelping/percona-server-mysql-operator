@@ -20,14 +20,14 @@ if [ "$1" = 'haproxy' ]; then
   custom_conf='/etc/haproxy-custom/haproxy.cfg'
   if [ -f "$custom_conf" ]; then
     log "haproxy -c -f $custom_conf -f /etc/haproxy/mysql/haproxy.cfg"
-    haproxy -c -f $custom_conf -f /etc/haproxy/mysql/haproxy.cfg || EC=$?
-    if [ -n "$EC" ]; then
-      log "The custom config $custom_conf is not valid and will be ignored."
-    fi
+    # haproxy -c -f $custom_conf -f /etc/haproxy/mysql/haproxy.cfg || EC=$?
+    # if [ -n "$EC" ]; then
+    #   log "The custom config $custom_conf is not valid and will be ignored."
+    # fi
   fi
 
   haproxy_opt='-W -db '
-  if [ -f "$custom_conf" -a -z "$EC" ]; then
+  if [ -f "$custom_conf" ]; then
     haproxy_opt+="-f $custom_conf "
   else
     haproxy_opt+='-f /opt/percona/haproxy-global.cfg '
