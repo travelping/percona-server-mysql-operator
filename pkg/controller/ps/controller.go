@@ -49,6 +49,7 @@ import (
 	"github.com/percona/percona-server-mysql-operator/pkg/binlogserver"
 	"github.com/percona/percona-server-mysql-operator/pkg/clientcmd"
 	"github.com/percona/percona-server-mysql-operator/pkg/controller/psrestore"
+	"github.com/percona/percona-server-mysql-operator/pkg/db"
 	database "github.com/percona/percona-server-mysql-operator/pkg/db"
 	"github.com/percona/percona-server-mysql-operator/pkg/haproxy"
 	"github.com/percona/percona-server-mysql-operator/pkg/k8s"
@@ -61,6 +62,11 @@ import (
 	"github.com/percona/percona-server-mysql-operator/pkg/secret"
 	"github.com/percona/percona-server-mysql-operator/pkg/util"
 )
+
+// Annotation for the switchover SQL reconcilation. This annotation is used
+// to track whether the SQL queries has been executed for a specific role
+// during switchover of roles of MySQL instances.
+const SwitchOverSQLAnnotation = "mysql.percona.com/switchover-sql-executed-for-role"
 
 // PerconaServerMySQLReconciler reconciles a PerconaServerMySQL object
 type PerconaServerMySQLReconciler struct {
@@ -420,6 +426,9 @@ func (r *PerconaServerMySQLReconciler) doReconcile(
 	if err := r.reconcileUsers(ctx, cr); err != nil {
 		return errors.Wrap(err, "users")
 	}
+	if err := r.reconcileSwitchoverSQL(ctx, cr); err != nil {
+		return errors.Wrap(err, "switchoverSQL")
+	}
 	if err := r.ensureTLSSecret(ctx, cr); err != nil {
 		return errors.Wrap(err, "TLS secret")
 	}
@@ -449,6 +458,119 @@ func (r *PerconaServerMySQLReconciler) doReconcile(
 	}
 	if err := r.cleanupOutdated(ctx, cr); err != nil {
 		return errors.Wrap(err, "cleanup outdated")
+	}
+
+	return nil
+}
+
+func (r *PerconaServerMySQLReconciler) reconcileSwitchoverSQL(ctx context.Context, cr *apiv1alpha1.PerconaServerMySQL) error {
+	log := logf.FromContext(ctx).WithName("reconcileSwitchoverSQL")
+
+	// For now we support only SwitchoverSQL provisioning only if the
+	// MySQL Cluster type is set to async
+	if !cr.Spec.MySQL.IsAsync() {
+		return nil
+	}
+
+	// Get configmap ${perconaservermysql-cr-name}-${NAMESPACE}-switch-over-sql
+	configMapName := fmt.Sprintf("%s-%s-switch-over-sql", cr.Name, cr.Namespace)
+	configMap := &corev1.ConfigMap{}
+	err := r.Client.Get(ctx, types.NamespacedName{
+		Name:      configMapName,
+		Namespace: cr.Namespace,
+	}, configMap)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		return errors.Wrap(err, "get ConfigMap")
+	}
+	primarySQL, hasPrimarySQL := configMap.Data["primary.sql"]
+	replicaSQL, hasReplicaSQL := configMap.Data["replica.sql"]
+
+	// Get root password. We will use it to execute switch-over SQL queries
+	rootPass, err := k8s.UserPassword(ctx, r.Client, cr, apiv1alpha1.UserRoot)
+	if err != nil {
+		return errors.Wrap(err, "get root password")
+	}
+
+	// Get primary host
+	primaryHost, err := r.getPrimaryHost(ctx, cr)
+	if err != nil {
+		return nil
+	}
+
+	// Get all MySQL instance pods
+	pods, err := k8s.PodsByLabels(ctx, r.Client, mysql.MatchLabels(cr), cr.Namespace)
+	if err != nil {
+		return errors.Wrap(err, "get pods")
+	}
+
+	for _, pod := range pods {
+		isPrimary := mysql.PodFQDN(cr, &pod) == primaryHost
+
+		// If pod is not ready yet, just skip it for now
+		if !k8s.IsPodReady(pod) {
+			continue
+		}
+
+		// Get role of the MySQL instance from the annotation.
+		// If an annotation value is set - we already executed switch-over SQL.
+		if pod.Annotations != nil {
+			if roleFromAnnotation, ok := pod.Annotations[SwitchOverSQLAnnotation]; ok {
+				if roleFromAnnotation == "primary" && isPrimary {
+					continue
+				}
+
+				if roleFromAnnotation == "replica" && !isPrimary {
+					continue
+				}
+			}
+		}
+
+		// Check primary label of the pod to be sure that operator
+		// already finished to configure replication and aware about
+		// the primary and the replica isntances
+		isPrimaryLabeled := false
+		if val, ok := pod.Labels["mysql.percona.com/primary"]; ok && val == "true" {
+			isPrimaryLabeled = true
+		}
+
+		if isPrimary && isPrimaryLabeled && hasPrimarySQL {
+			log.Info("Executing primary switchover SQL", "pod", pod.Name)
+
+			sm := db.NewSwitchoverSQLManager(&pod, r.ClientCmd, apiv1alpha1.UserRoot, rootPass, mysql.PodFQDN(cr, &pod))
+			err := sm.ExecSQL(ctx, primarySQL)
+			if err != nil {
+				return errors.Wrap(err, "ExecSQL for primary failed")
+			}
+
+			// If the SQL was executed successfully mark this pod
+			// to not repeat the query
+			patch := client.MergeFrom(pod.DeepCopy())
+			pod.Annotations[SwitchOverSQLAnnotation] = "primary"
+			err = r.Client.Patch(ctx, &pod, patch)
+			if err != nil {
+				return errors.Wrap(err, "patch pod annotations during switchover")
+			}
+		} else if !isPrimary && hasReplicaSQL {
+			log.Info("Executing replica switchover SQL", "pod", pod.Name)
+
+			sm := db.NewSwitchoverSQLManager(&pod, r.ClientCmd, apiv1alpha1.UserRoot, rootPass, mysql.PodFQDN(cr, &pod))
+			err := sm.ExecSQL(ctx, replicaSQL)
+			if err != nil {
+				return errors.Wrap(err, "ExecSQL for replica failed")
+			}
+
+			// If the SQL was executed successfully mark this pod
+			// to not repeat the query
+			patch := client.MergeFrom(pod.DeepCopy())
+			pod.Annotations[SwitchOverSQLAnnotation] = "replica"
+			err = r.Client.Patch(ctx, &pod, patch)
+			if err != nil {
+				return errors.Wrap(err, "patch pod annotations during switchover")
+			}
+		}
 	}
 
 	return nil
