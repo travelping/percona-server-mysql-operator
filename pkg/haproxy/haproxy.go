@@ -2,6 +2,7 @@ package haproxy
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -132,7 +133,8 @@ func Service(cr *apiv1alpha1.PerconaServerMySQL, secret *corev1.Secret) *corev1.
 func StatefulSet(cr *apiv1alpha1.PerconaServerMySQL, initImage, configHash, tlsHash string, secret *corev1.Secret) *appsv1.StatefulSet {
 	labels := MatchLabels(cr)
 
-	annotations := make(map[string]string)
+	annotations := maps.Clone(cr.Spec.Proxy.HAProxy.Annotations)
+
 	if configHash != "" {
 		annotations[string(naming.AnnotationConfigHash)] = configHash
 	}
