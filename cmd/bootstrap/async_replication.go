@@ -274,6 +274,10 @@ func selectDonor(ctx context.Context, fqdn, primary string, replicas []string) (
 }
 
 func isCloneRequired(file string) (bool, error) {
+	if !getCloneRequiredFromEnv() {
+		return false, nil
+	}
+
 	_, err := os.Stat(file)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -291,6 +295,25 @@ func createCloneLock(file string) error {
 }
 
 func deleteCloneLock(file string) error {
-	err := os.Remove(file)
-	return errors.Wrapf(err, "remove %s", file)
+	if err := os.Remove(file); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return errors.Wrapf(err, "remove %s", file)
+	}
+
+	return nil
+}
+
+func getCloneRequiredFromEnv() bool {
+	s, ok := os.LookupEnv("CLONE_REQUIRED_ON_ASYNC_CLUSTER")
+	if !ok {
+		return true
+	}
+
+	if s == "true" {
+		return true
+	}
+
+	return false
 }
