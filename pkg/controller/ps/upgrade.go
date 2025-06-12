@@ -2,7 +2,10 @@ package ps
 
 import (
 	"context"
+	"fmt"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/pkg/errors"
@@ -95,12 +98,35 @@ func (r *PerconaServerMySQLReconciler) smartUpdate(ctx context.Context, sts *app
 			continue
 		}
 
-		log.Info("apply changes to secondary pod", "pod", pod.Name)
-
 		if pod.ObjectMeta.Labels[controllerRevisionHash] == sts.Status.UpdateRevision {
 			log.Info("pod updated", "pod", pod.Name)
-			continue
+
+			syncTimeout, err := getReplicaSyncTimeout()
+			if err != nil {
+				log.Error(err, "REPLICATION_SYNC_WAIT_TIME_ON_UPGRADE is unusable")
+				continue
+			}
+
+			if syncTimeout == 0 {
+				continue
+			}
+
+			syncTimeoutDuration := time.Duration(syncTimeout)
+			readyCondition := findPodReadyCondition(&pod)
+			if readyCondition == nil {
+				return nil
+			}
+			timeSincePodReady := time.Since(readyCondition.LastTransitionTime.Time)
+
+			log.Info("The next pod updat will be triggered soon.", "time", syncTimeoutDuration*time.Minute-timeSincePodReady)
+			if timeSincePodReady >= syncTimeoutDuration*time.Minute {
+				continue
+			}
+
+			return nil
 		}
+
+		log.Info("apply changes to secondary pod", "pod", pod.Name)
 
 		return deletePod(ctx, r.Client, &pod, currentSet)
 	}
@@ -207,9 +233,36 @@ func deletePod(ctx context.Context, cli client.Client, pod *corev1.Pod, sts *app
 
 		if s.Status.ReadyReplicas == s.Status.Replicas {
 			return errors.New("sts.Status.readyReplicas not updated")
-
 		}
 
 		return nil
 	})
+}
+
+func getReplicaSyncTimeout() (uint32, error) {
+	s, ok := os.LookupEnv("REPLICATION_SYNC_WAIT_TIME_ON_UPGRADE")
+	if !ok {
+		return 0, nil
+	}
+
+	readTimeout, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("REPLICATION_SYNC_WAIT_TIME_ON_UPGRADE must be positive number. Error - %v", err)
+	}
+
+	if readTimeout < 0 {
+		return 0, fmt.Errorf("REPLICATION_SYNC_WAIT_TIME_ON_UPGRADE can't be negative.")
+	}
+
+	return uint32(readTimeout), nil
+}
+
+func findPodReadyCondition(pod *corev1.Pod) *corev1.PodCondition {
+	for i, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return &pod.Status.Conditions[i]
+		}
+	}
+
+	return nil
 }
